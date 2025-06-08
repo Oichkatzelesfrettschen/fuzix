@@ -1,0 +1,69 @@
+# Basic Makefile for FUZIX PDP-8 Port
+# This is highly conceptual and depends on the chosen toolchain (CC8-cross)
+
+# Define PDP-8 C Compiler (cross-compiler) and Assembler
+CC = cc8-cross  # Placeholder for the actual CC8 cross-compiler command
+AS = pal8-assembler # Placeholder for a PAL8/SABR assembler if separate
+LD = os8-linker # Placeholder for the OS/8 linker (likely run under OS/8 or SIMH)
+OBJCOPY = objcopy # Or similar for format conversion if needed
+
+# Source files
+C_SOURCES = pdp8/kernel/main.c pdp8/lib/memcpy.c # ... other C files
+ASM_SOURCES_PAL = pdp8/asm/vectors.s pdp8/asm/lowcore.s # ... other PAL8 files
+
+# Output: SABR files from C, then .RL (relocatable) from SABR, then .BIN
+# This Makefile might only handle the Host -> SABR part.
+# The SABR -> .RL -> .BIN part is usually done IN OS/8.
+
+SABR_OBJS_C = $(C_SOURCES:.c=.sb)
+SABR_OBJS_ASM = $(ASM_SOURCES_PAL:.s=.sb) # If assembler outputs SABR
+
+REL_OBJS = $(SABR_OBJS_C:.sb=.rl) $(SABR_OBJS_ASM:.sb=.rl)
+
+TARGET_BIN = fuzix_pdp8.bin
+
+# Compiler flags for CC8 (K&R C)
+# May need flags for memory model, specific PDP-8 variant, etc.
+CFLAGS = -I./pdp8/include # Add include path for head.h
+
+# Assembler flags
+ASFLAGS =
+
+# Default target
+all: $(TARGET_BIN)
+
+# Rule to compile C to SABR
+%.sb: %.c
+	$(CC) $(CFLAGS) -o $@ $<
+
+# Rule to assemble PAL8 to SABR (if assembler does this)
+# Otherwise, PAL8 files might be assembled directly to .RL under OS/8
+%.sb: %.s
+	$(AS) $(ASFLAGS) -o $@ $<
+
+# This part is tricky: Linking is usually done under OS/8.
+# This Makefile might stop at generating all .sb files.
+# The user would then use os8-cp to move them to an OS/8 image
+# and run SABR assembler and LOAD linker there.
+
+# Conceptual target for the final binary (might not be directly buildable this way)
+$(TARGET_BIN): $(REL_OBJS)
+	@echo "Linking $(REL_OBJS) to produce $(TARGET_BIN) requires OS/8 environment."
+	@echo "This Makefile primarily generates SABR files."
+	@echo "Please transfer *.sb files to OS/8 and use SABR assembler and LOAD."
+	# $(LD) -o $(TARGET_BIN) $(REL_OBJS) # This is just a placeholder
+
+# Target to list SABR files to be transferred
+sabr_files: $(SABR_OBJS_C) $(SABR_OBJS_ASM)
+	@echo "Generated SABR files:"
+	@ls $^
+
+clean:
+	rm -f $(SABR_OBJS_C) $(SABR_OBJS_ASM) $(REL_OBJS) $(TARGET_BIN)
+	rm -f pdp8/kernel/*.sb pdp8/lib/*.sb pdp8/asm/*.sb
+
+print_sources:
+	@echo "C Sources: $(C_SOURCES)"
+	@echo "Assembly Sources: $(ASM_SOURCES_PAL)"
+
+.PHONY: all clean sabr_files print_sources

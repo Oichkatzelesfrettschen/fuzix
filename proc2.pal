@@ -1,0 +1,29 @@
+/ proc2.pal - Example Process B
+
+    FIELD   FIELD1      / This process runs in Field 1
+    *0200               / Code for this process starts at 200 in its field
+
+    EXTERN TTY_OUT
+    EXTERN YIELD
+
+MSG_B,  "B"
+        0
+
+LOOP_B,
+    TAD (MSG_B)
+    JMS TTY_OUT
+
+    / Delay loop
+    TAD (DELAY_COUNT_B)
+    STA CTR_B
+DELAY_INNER_B,
+    ISZ CTR_B
+    JMP DELAY_INNER_B
+
+    JMS YIELD
+    JMP LOOP_B
+
+DELAY_COUNT_B, -1500
+CTR_B,  0
+
+    END

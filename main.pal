@@ -1,0 +1,129 @@
+/ main.pal
+/ Main entry point and Kernel Initialization
+
+    FIELD   FIELD7      / Kernel runs in Field 7
+    *0200               / Kernel code starts at 0200 in Field 7
+
+    EXTERN  PCBS, PCB_SIZE, N_PROCESSES, N_PROCESSES_VAL
+    EXTERN  P_AC, P_L, P_PC, P_IF, P_DF, P_SSP, P_STATE
+    EXTERN  STATE_READY, STATE_FREE, STATE_READY_VAL, STATE_FREE_VAL
+    EXTERN  CURRENT_PROCESS_INDEX, CURRENT_PROCESS_INDEX_MEM
+    EXTERN  PROC_A_CODE_START, PROC_A_STACK_TOP
+    EXTERN  PROC_B_CODE_START, PROC_B_STACK_TOP
+    EXTERN  FIELD0_VAL, FIELD1_VAL / Constants for field numbers
+    EXTERN  PCBS_BASE_ADDR
+
+    EXTERN  TTY_INIT        / This was the old polled TTY init, will be replaced/augmented
+    EXTERN  MONITOR_START
+    EXTERN  SCHEDULER
+
+    EXTERN  KB_HEAD, KB_TAIL, KB_COUNT
+    EXTERN  TP_HEAD, TP_TAIL, TP_COUNT, TP_FLAG_BUSY
+
+/ PDP-8 IOT Instructions for TTY Interrupt Enable
+/ These are HYPOTHETICAL. Actual IOTs depend on the PDP-8 model & TTY interface.
+/ KIE = Keyboard Interrupt Enable (e.g., 6035 or part of KCF/KCC)
+/ TIE = Teleprinter Interrupt Enable (e.g., 6045 or part of TPC/TLS)
+/ Often, interrupt enable is bit 0 of an IOT, e.g. KCF sets enable if AC0=1.
+/ For now, assume simple IOTs exist.
+KBD_INT_ENABLE_IOT = 6035   / Hypothetical: Enable Keyboard Interrupts
+TPR_INT_ENABLE_IOT = 6045   / Hypothetical: Enable Teleprinter Interrupts
+                            / TSF usually enables interrupt if printer is ready.
+                            / TPC usually enables interrupt after char is printed.
+
+KERNEL_START,
+    IOF                     / Interrupts initially globally OFF
+    CIF     FIELD7          / Set Instruction Field to Kernel
+    CDF     FIELD7          / Set Data Field to Kernel
+
+    JMS     INIT_TTY_INTERRUPT_DRIVEN / Initialize new TTY system
+
+    / Initialize PCB Table (as before)
+    TAD     (PCBS_BASE_ADDR)
+    STA     PTR
+    TAD     (N_PROCESSES_VAL)
+    STA     COUNT
+INIT_PCB_LOOP,
+    TAD     (STATE_FREE_VAL)
+    DCA     I (PTR+P_STATE)
+    TAD     (PCB_SIZE_VAL_CONST) / PCB_SIZE might be an offset, need value
+    ADD     PTR
+    STA     PTR
+    ISZ     COUNT
+    JMP     INIT_PCB_LOOP
+
+    / Setup Process A (PID 0) - as before
+    CLA; STA TEMP_PID
+    CALL    SETUP_PROC_PCB
+    TAD (PROC_A_CODE_START); DCA I (PTR+P_PC)
+    TAD (FIELD0_VAL_CONST); DCA I (PTR+P_IF); DCA I (PTR+P_DF)
+    TAD (PROC_A_STACK_TOP); DCA I (PTR+P_SSP)
+    TAD (STATE_READY_VAL); DCA I (PTR+P_STATE)
+
+    / Setup Process B (PID 1) - as before
+    TAD (ONE_CONST); STA TEMP_PID
+    CALL    SETUP_PROC_PCB
+    TAD (PROC_B_CODE_START); DCA I (PTR+P_PC)
+    TAD (FIELD1_VAL_CONST); DCA I (PTR+P_IF); DCA I (PTR+P_DF)
+    TAD (PROC_B_STACK_TOP); DCA I (PTR+P_SSP)
+    TAD (STATE_READY_VAL); DCA I (PTR+P_STATE)
+
+    DCA CURRENT_PROCESS_INDEX_MEM / Initialize current process index to -1 or N_PROC-1
+
+    ION                     / Global Interrupts ON
+                            / Device interrupts must be enabled BEFORE this for them to fire.
+
+    JMP     MONITOR_START   / Jump to monitor
+    / Or, to start multitasking directly:
+    / JMP SCHEDULER
+
+INIT_TTY_INTERRUPT_DRIVEN, 0
+    / Initialize Keyboard Buffer
+    CLA
+    DCA     KB_HEAD
+    DCA     KB_TAIL
+    DCA     KB_COUNT
+
+    / Initialize Teleprinter Buffer
+    DCA     TP_HEAD
+    DCA     TP_TAIL
+    DCA     TP_COUNT
+    DCA     TP_FLAG_BUSY    / Mark TP as initially idle
+
+    / Enable Device Interrupts at the TTY hardware level
+    KCF                     / Often, initial KCF clears any pending char & enables keyboard for interrupt
+                            / Or specific KIE if exists.
+                            / KBD_INT_ENABLE_IOT  / Execute specific Keyboard Interrupt Enable IOT
+
+    TCF                     / Clear teleprinter flag. TP will interrupt after a char is sent
+                            / via TPC and it's ready for the next.
+                            / TPR_INT_ENABLE_IOT  / Execute specific Teleprinter Interrupt Enable IOT
+
+    JMP     I INIT_TTY_INTERRUPT_DRIVEN / Return
+
+/ Helper to get address of PCB for PID in TEMP_PID into PTR (as before)
+SETUP_PROC_PCB, 0
+    TAD     TEMP_PID
+    STA     IDX
+    CLA
+    TAD     IDX; ADD IDX; STA OFFSET_CALC / PID*2 (example for PCB_SIZE_VAL_CONST=5)
+    TAD     IDX; ADD OFFSET_CALC; STA OFFSET_CALC / PID*3
+    TAD     IDX; ADD OFFSET_CALC; STA OFFSET_CALC / PID*4
+    TAD     IDX; ADD OFFSET_CALC; STA OFFSET_CALC / PID*5
+    TAD     (PCBS_BASE_ADDR)
+    ADD     OFFSET_CALC
+    STA     PTR
+    JMP I SETUP_PROC_PCB
+
+PTR,    0
+COUNT,  0
+TEMP_PID,0
+PCB_SIZE_VAL_CONST, PCB_SIZE / Assuming PCB_SIZE is an equate for the value
+FIELD0_VAL_CONST, FIELD0
+FIELD1_VAL_CONST, FIELD1
+ONE_CONST, 1
+IDX, 0
+OFFSET_CALC, 0
+
+
+    END

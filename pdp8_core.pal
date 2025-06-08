@@ -1,0 +1,331 @@
+/ pdp8_core.pal
+/ Core OS Routines for Minimal PDP-8 Kernel
+/ Interrupt Handling, Context Switching, Field Management, TTY I/O, Scheduler
+
+/ External symbols
+    FIELD   FIELD0, FIELD7
+
+    EXTERN  TMP_AC_SAVE, TMP_L_SAVE, SAVED_PC_FIELD0_PTR
+    EXTERN  PCBS, PCB_SIZE, N_PROCESSES, N_PROCESSES_VAL, CURRENT_PROCESS_INDEX, CURRENT_PROCESS_INDEX_MEM
+    EXTERN  P_AC, P_L, P_PC, P_IF, P_DF, P_SSP, P_STATE
+    EXTERN  STATE_RUNNING, STATE_READY, STATE_FREE, STATE_WAITING
+    EXTERN  STATE_READY_VAL, STATE_RUNNING_VAL
+    EXTERN  PCBS_BASE_ADDR
+
+    EXTERN  KB_BUFFER, KB_BUF_SIZE, KB_HEAD, KB_TAIL, KB_COUNT
+    EXTERN  TP_BUFFER, TP_BUF_SIZE, TP_HEAD, TP_TAIL, TP_COUNT, TP_FLAG_BUSY
+
+    EXTERN  KERNEL_ISR_HANDLER_EXTENDED_SAVE
+    EXTERN  INTERRUPT_DISPATCHER    / Will be defined here
+    EXTERN  TTY_KB_ISR              / Will be defined here
+    EXTERN  TTY_TP_ISR              / Will be defined here
+    EXTERN  TTY_PUTC_KERNEL         / Will be defined here
+    EXTERN  RESTORE_PROCESS_STATE
+    EXTERN  SCHEDULER
+    EXTERN  SET_IF_FROM_AC, SET_DF_FROM_AC, SET_L_FROM_AC / Assumed utility routines
+    EXTERN  GET_CUR_PCB_ADDR        / Assumed utility routine
+    EXTERN  CALC_PCB_ADDR_FROM_IDX_TEMP / Assumed utility routine
+
+/ Constants for TTY IOT instructions (generic, replace with actuals for target PDP-8 model)
+/ Assumes KCF clears flag AND reads char. TPC clears flag AND prints.
+KCF=    6031    / Keyboard Clear Flag / Read Character into AC
+KSF=    6032    / Keyboard Skip on Flag (if char available)
+KIE=    6030    / Keyboard Interrupt Enable (conceptual IOT, might be part of KCF or other)
+                / Often, reading the char (KCF/KRB) makes device ready for next interrupt.
+
+TSF=    6042    / Teleprinter Skip on Flag (if printer ready for char)
+TPC=    6041    / Teleprinter Print Character from AC, Clear Flag (older models might be 6044)
+TIE=    6040    / Teleprinter Interrupt Enable (conceptual IOT)
+
+
+/ Temp storage within core module
+AC_TEMP, 0
+L_TEMP,  0
+IF_TEMP, 0
+DF_TEMP, 0
+PC_TEMP, 0
+PTR,     0
+NEXT_PROC_PTR, 0
+SCHED_LOOP_COUNT, 0
+CHAR_SAVE, 0 / For TTY_PUTC_KERNEL
+IDX_TEMP, 0  / For SCHEDULER index manipulation
+
+/***********************************************************************
+/ Interrupt Service Routine Entry & Extended Handler (Simplified from Phase 1)
+/***********************************************************************
+    *1  / Field 0, Addr 1
+ISR_ENTRY,
+    DCA     TMP_AC_SAVE     / In Field 0, Page 0, or Kernel Page 0 if DF setup by ROM
+    RAL                     / Assume L to AC.11
+    DCA     TMP_L_SAVE      / Save L (in AC)
+    JMP     I KERNEL_ISR_HANDLER_EXTENDED_SAVE / Indirect to Kernel Field
+
+KERNEL_ISR_HANDLER_EXTENDED_SAVE, 0 / In Kernel Field
+    TAD     TMP_AC_SAVE; STA AC_TEMP
+    TAD     TMP_L_SAVE;  STA L_TEMP
+    RDF; STA DF_TEMP
+    RIF; STA IF_TEMP
+    CIF     FIELD7; CDF FIELD7
+
+    TAD     I (SAVED_PC_FIELD0_PTR) / Get PC from Field0, Addr0
+    STA     PC_TEMP
+
+    / Save to current PCB (simplified, assumes GET_CUR_PCB_ADDR works)
+    CALL    GET_CUR_PCB_ADDR; STA PTR
+    TAD AC_TEMP; DCA I (PTR+P_AC)
+    TAD L_TEMP;  DCA I (PTR+P_L)
+    TAD PC_TEMP; DCA I (PTR+P_PC) / This is return PC for the *interrupted task*
+    TAD IF_TEMP; DCA I (PTR+P_IF)
+    TAD DF_TEMP; DCA I (PTR+P_DF)
+
+    JMS     INTERRUPT_DISPATCHER    / Process the interrupt
+
+    / Simplified Non-Preemptive Return: Restore original context
+    CALL    GET_CUR_PCB_ADDR; STA PTR / Get current (possibly same) PCB
+    TAD I (PTR+P_IF); CALL SET_IF_FROM_AC
+    TAD I (PTR+P_DF); CALL SET_DF_FROM_AC
+    TAD I (PTR+P_L);  CALL SET_L_FROM_AC
+
+    TAD I (PTR+P_PC)                / Get task's PC to return to
+    DCA I (SAVED_PC_FIELD0_PTR)     / Put it in F0,0 for the JMP I (F0,0)
+
+    TAD I (PTR+P_AC)                / Restore AC
+    ION                             / Interrupts ON just before return
+    JMP I (SAVED_PC_FIELD0_PTR)     / Return from interrupt
+
+/***********************************************************************
+/ Interrupt Dispatcher (Modified for TTY)
+/***********************************************************************
+INTERRUPT_DISPATCHER, 0
+    KSF                     / Skip if Keyboard Flag
+    JMP     IDISP_CHK_TP    / No keyboard, check teleprinter
+    JMS     TTY_KB_ISR      / Handle keyboard interrupt
+    JMP     IDISP_END       / Done with keyboard
+
+IDISP_CHK_TP,
+    TSF                     / Skip if Teleprinter Flag
+    JMP     IDISP_OTHER     / No teleprinter, check other
+    JMS     TTY_TP_ISR      / Handle teleprinter interrupt
+    JMP     IDISP_END       / Done with teleprinter
+
+IDISP_OTHER,
+    / ... check other device flags ...
+IDISP_END,
+    JMP     I INTERRUPT_DISPATCHER / Return from JMS INTERRUPT_DISPATCHER
+
+/***********************************************************************
+/ TTY Keyboard ISR
+/***********************************************************************
+TTY_KB_ISR, 0               / Keyboard interrupt occurred
+    KCF                     / Read char into AC, clears keyboard flag.
+    STA     KB_CHAR_TEMP    / Save char temporarily
+
+    / Check if buffer is full
+    TAD     KB_COUNT
+    CIA
+    ADD     (KB_BUF_SIZE_VAL) / KB_BUF_SIZE - KB_COUNT
+    SNA                     / Skip if not zero (buffer not full: size > count)
+    JMP     KB_BUF_FULL     / Buffer is full, char lost (or handle error)
+
+    / Buffer not full, add char
+    TAD     KB_HEAD
+    ADD     (KB_BUFFER_BASE)
+    STA     PTR             / PTR = address of KB_BUFFER[KB_HEAD]
+    TAD     KB_CHAR_TEMP
+    DCA     I PTR           / Store char in buffer
+
+    ISZ     KB_HEAD         / Increment KB_HEAD
+    TAD     KB_HEAD
+    CIA
+    ADD     (KB_BUF_SIZE_VAL) / If (KB_HEAD - KB_BUF_SIZE) == 0
+    SZA                     / Skip if result is zero (KB_HEAD was KB_BUF_SIZE)
+    JMP     KB_HEAD_OK
+    CLA                     / Wrap KB_HEAD to 0
+    STA     KB_HEAD
+KB_HEAD_OK,
+    ISZ     KB_COUNT        / Increment KB_COUNT
+
+    / Optional: Echo character by putting it to Teleprinter Output Buffer
+    TAD     KB_CHAR_TEMP
+    JMS     TTY_PUTC_KERNEL / This will handle TP logic
+
+KB_BUF_FULL,                / Label for when buffer is full (char is lost)
+    JMP     I TTY_KB_ISR    / Return from JMS TTY_KB_ISR
+KB_CHAR_TEMP, 0
+KB_BUFFER_BASE, KB_BUFFER
+KB_BUF_SIZE_VAL, KB_BUF_SIZE
+
+/***********************************************************************
+/ TTY Teleprinter ISR
+/***********************************************************************
+TTY_TP_ISR, 0               / Teleprinter interrupt occurred (ready for next char)
+    / TPC or TLS usually clears the flag. If not, clear it here.
+    / Example: IOT TCF_CLEAR_FLAG_ONLY
+
+    TAD     TP_COUNT
+    SZA                     / Skip if TP_COUNT is Zero (buffer empty)
+    JMP     TP_HAS_DATA     / Buffer has data, proceed to send
+
+TP_BUF_EMPTY,               / Buffer is empty
+    CLA
+    STA     TP_FLAG_BUSY    / Mark teleprinter as not busy
+    / Optional: Explicitly disable TTY printer interrupts via IOT if necessary
+    / TPI_DISABLE_IOT
+    JMP     I TTY_TP_ISR    / Return
+
+TP_HAS_DATA,
+    TAD     TP_TAIL
+    ADD     (TP_BUFFER_BASE)
+    STA     PTR             / PTR = address of TP_BUFFER[TP_TAIL]
+    TAD     I PTR           / Get char from buffer into AC
+    TPC                     / Send char to teleprinter (this also re-arms for next interrupt)
+
+    ISZ     TP_TAIL         / Increment TP_TAIL
+    TAD     TP_TAIL
+    CIA
+    ADD     (TP_BUF_SIZE_VAL) / If (TP_TAIL - TP_BUF_SIZE) == 0
+    SZA                     / Skip if result is zero
+    JMP     TP_TAIL_OK
+    CLA                     / Wrap TP_TAIL to 0
+    STA     TP_TAIL
+TP_TAIL_OK,
+    ISZ     TP_COUNT_NEG    / Decrement TP_COUNT (using a negative counter for ISZ)
+                            / Requires TP_COUNT_NEG to be initialized to -TP_COUNT
+
+    / If TP_COUNT becomes 0 after this send, the next interrupt will find it empty.
+    JMP     I TTY_TP_ISR    / Return
+TP_BUFFER_BASE, TP_BUFFER
+TP_BUF_SIZE_VAL, TP_BUF_SIZE
+TP_COUNT_NEG, 0 / Needs to be managed carefully alongside TP_COUNT
+
+/***********************************************************************
+/ TTY_PUTC_KERNEL: Kernel routine to add char to output buffer
+/***********************************************************************
+TTY_PUTC_KERNEL, 0          / Input: Char in AC
+    STA     CHAR_SAVE       / Save char
+
+    / Check if TP buffer is full
+    TAD     TP_COUNT
+    CIA
+    ADD     (TP_BUF_SIZE_VAL) / TP_BUF_SIZE - TP_COUNT
+    SNA                     / Skip if not zero (buffer not full)
+    JMP     PUTC_BUF_FULL   / Buffer is full, char lost for now
+
+    / Buffer not full, add char
+    TAD     TP_HEAD
+    ADD     (TP_BUFFER_BASE)
+    STA     PTR             / PTR = address of TP_BUFFER[TP_HEAD]
+    TAD     CHAR_SAVE
+    DCA     I PTR           / Store char in buffer
+
+    ISZ     TP_HEAD         / Increment TP_HEAD
+    TAD     TP_HEAD
+    CIA
+    ADD     (TP_BUF_SIZE_VAL) / If (TP_HEAD - TP_BUF_SIZE) == 0
+    SZA                     / Skip if result is zero
+    JMP     PUTC_HEAD_OK
+    CLA                     / Wrap TP_HEAD to 0
+    STA     TP_HEAD
+PUTC_HEAD_OK,
+    ISZ     TP_COUNT_NEG_INC / Increment TP_COUNT (using a negative counter for ISZ)
+                             / This needs to be TP_COUNT itself or a shadow.
+                             / Let's use direct ISZ on TP_COUNT.
+    ISZ     TP_COUNT
+
+    / If TP was idle and buffer now has data, kick-start output
+    TAD     TP_FLAG_BUSY
+    SNA                     / Skip if TP_FLAG_BUSY is Not Zero (it is busy)
+    JMP     PUTC_WAS_BUSY   / TP already busy, ISR will handle it
+
+    / TP was IDLE, and TP_COUNT > 0 (we just added a char)
+    TAD     TP_COUNT        / Check if count is indeed > 0 (should be)
+    SZA
+    JMP     PUTC_KICKSTART
+
+PUTC_BUF_FULL,              / Buffer was full, char not queued
+    JMP     I TTY_PUTC_KERNEL / Return (char lost, or error flag)
+
+PUTC_WAS_BUSY,              / TP was already busy
+    JMP     I TTY_PUTC_KERNEL / Return
+
+PUTC_KICKSTART,             / TP was idle, buffer has data, so kick-start
+    CLA
+    ADD     (ONE_CONST)     / Use a defined constant for 1
+    STA     TP_FLAG_BUSY    / Mark TP as busy
+
+    / Send first char from TP_TAIL (don't advance TAIL yet, ISR will do it)
+    TAD     TP_TAIL
+    ADD     (TP_BUFFER_BASE)
+    STA     PTR
+    TAD     I PTR           / Get char from TP_BUFFER[TP_TAIL]
+    TPC                     / Send char (this enables TP interrupts for next char)
+    / NOTE: TPC here means the ISR will get the interrupt for *this* char being done.
+    / The ISR will then send the *next* char at TP_TAIL and advance it.
+    / This implies the char sent here is effectively "processed" by this TPC.
+    / So, we should advance TP_TAIL and decrement TP_COUNT here too.
+    ISZ     TP_TAIL
+    TAD     TP_TAIL; CIA; ADD (TP_BUF_SIZE_VAL); SZA; JMP KST_TAIL_OK
+    CLA; STA TP_TAIL
+KST_TAIL_OK,
+    ISZ     TP_COUNT_NEG_KICK / Decrement TP_COUNT
+
+    JMP     I TTY_PUTC_KERNEL / Return
+TP_COUNT_NEG_INC, 0 / Counter for TP_COUNT increment
+TP_COUNT_NEG_KICK, 0
+ONE_CONST, 1
+
+/***********************************************************************
+/ Process-facing TTY routines (Simplified for now)
+/***********************************************************************
+/ TTY_GETCHAR_PROCESS (New, replaces polled TTY_IN for processes)
+TTY_GETCHAR_PROCESS, 0
+    IOF                     / Disable interrupts for atomic check
+    TAD     KB_COUNT
+    SZA                     / Skip if KB_COUNT is zero
+    JMP     GETC_HAS_DATA   / Buffer has data
+
+GETC_EMPTY,                 / Buffer empty
+    TAD     (MONE_CONST)    / Return -1 in AC (or some error code / Link state)
+    ION
+    JMP     I TTY_GETCHAR_PROCESS / Return "no char"
+
+GETC_HAS_DATA,
+    TAD     KB_TAIL
+    ADD     (KB_BUFFER_BASE)
+    STA     PTR
+    TAD     I PTR           / Get char from buffer into AC
+    STA     CHAR_SAVE       / Save it
+
+    ISZ     KB_TAIL
+    TAD     KB_TAIL; CIA; ADD (KB_BUF_SIZE_VAL); SZA; JMP GETC_TAIL_OK
+    CLA; STA KB_TAIL
+GETC_TAIL_OK,
+    ISZ     KB_COUNT_NEG    / Decrement KB_COUNT
+
+    TAD     CHAR_SAVE       / Restore char to AC
+    ION
+    JMP     I TTY_GETCHAR_PROCESS / Return char in AC
+MONE_CONST, -1
+KB_COUNT_NEG, 0
+
+/ TTY_PUTC_PROCESS (New, replaces polled TTY_OUT for processes)
+TTY_PUTC_PROCESS, 0         / Input: Char in AC
+    STA     CHAR_SAVE       / Save char
+
+    / Check TP buffer space (simplified, assumes TTY_PUTC_KERNEL handles full)
+    / In a real system, might loop/yield if buffer full.
+    TAD     CHAR_SAVE
+    JMS     TTY_PUTC_KERNEL / Call kernel routine to queue it
+
+    / Return status? For now, assume success or char lost if buffer full in kernel.
+    JMP     I TTY_PUTC_PROCESS
+
+
+/ Other routines (SCHEDULER, YIELD, SAVE/RESTORE_PROCESS_STATE etc.) from previous steps...
+/ Ensure EXTERN declarations match actual definitions.
+/ Need to define GET_CUR_PCB_ADDR, CALC_PCB_ADDR_FROM_IDX_TEMP, SET_IF_FROM_AC etc.
+/ These might be in a pdp8_utils.pal or similar.
+
+    HLT / TEMP HLT TO MARK END OF NEW CODE FOR REVIEW
+
+    END
