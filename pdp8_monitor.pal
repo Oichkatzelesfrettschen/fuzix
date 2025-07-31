@@ -1,0 +1,142 @@
+/ pdp8_monitor.pal
+/ Simple Monitor/Shell for Minimal PDP-8 Kernel
+
+    FIELD   FIELD7      / Monitor runs in Kernel Field
+    EXTERN  TTY_IN
+    EXTERN  TTY_OUT
+    EXTERN  PCBS
+    EXTERN  P_PC, P_IF, P_DF, P_STATE
+    EXTERN  CURRENT_PROCESS_INDEX
+    EXTERN  N_PROCESSES
+    EXTERN  STATE_READY
+    EXTERN  SCHEDULER       / To start a process or yield
+
+/ Monitor prompt string (each char in a word, lower 8 bits, null terminated)
+PROMPT_MSG, "M"
+            "O"
+            "N"
+            ">"
+            " "
+            0
+
+/ Buffer for user input
+INPUT_BUF,  BLOCK 20 / Max 20 chars for command buffer
+BUF_PTR,    0        / Pointer into input buffer
+
+MONITOR_START,
+    JMS     DISPLAY_PROMPT
+MONITOR_LOOP,
+    JMS     READ_COMMAND
+    JMS     PARSE_COMMAND
+    JMP     MONITOR_LOOP
+
+DISPLAY_PROMPT, 0
+    CLA
+    TAD     (PROMPT_MSG)    / Get address of prompt string
+    STA     STR_PTR
+DP_LOOP,
+    TAD     I STR_PTR       / Get char from string
+    SZA                     / Skip if zero (end of string)
+    JMP     DP_END
+    JMS     TTY_OUT         / Print char
+    ISZ     STR_PTR         / Increment string pointer
+    JMP     DP_LOOP
+DP_END,
+    JMP     I DISPLAY_PROMPT / Return
+STR_PTR,    0
+
+READ_COMMAND, 0
+    CLA
+    TAD     (INPUT_BUF)     / Point to start of input buffer
+    STA     BUF_PTR
+RC_LOOP,
+    JMS     TTY_IN          / Get char from user
+    JMS     TTY_OUT         / Echo char
+    STA     I BUF_PTR       / Store char in buffer
+    TAD     I BUF_PTR
+    AND     (CR_MASK)       / Check for Carriage Return (015)
+    SNA                     / Skip if not CR
+    JMP     RC_END_CR       / Got CR, end command
+    ISZ     BUF_PTR
+    TAD     BUF_PTR         / Check buffer limit (conceptual)
+    CIA
+    ADD     (INPUT_BUF+20)
+    SNA                     / Skip if not full
+    JMP     RC_LOOP
+RC_END_CR,                  / Handle CR
+    CLA                     / Store null at end of command
+    STA     I BUF_PTR
+RC_END,
+    JMP     I READ_COMMAND  / Return
+CR_MASK,    015
+
+PARSE_COMMAND, 0
+    / Very simple parser: "run <pid>"
+    / "peek <field> <addr>"
+    / "poke <field> <addr> <val>"
+    TAD     (INPUT_BUF)
+    STA     PTR             / PTR to command string
+
+    / Check for "run"
+    TAD     I PTR           / 'r'
+    CIA
+    ADD     ("r")
+    SNA                     / Skip if not 'r'
+    JMP     PC_NOT_RUN
+    ISZ     PTR
+    TAD     I PTR           / 'u'
+    CIA
+    ADD     ("u")
+    SNA
+    JMP     PC_NOT_RUN
+    ISZ     PTR
+    TAD     I PTR           / 'n'
+    CIA
+    ADD     ("n")
+    SNA
+    JMP     PC_NOT_RUN
+    ISZ     PTR             / Skip space
+    ISZ     PTR
+    TAD     I PTR           / Get PID char '0' or '1'
+    CIA
+    ADD     ("0")           / Convert '0' to 0, '1' to 1
+    STA     PID_TO_RUN
+    JMS     DO_RUN_COMMAND
+    JMP     PC_END
+
+PC_NOT_RUN,
+    / Add other command parsing here (peek, poke)
+    JMS     UNKNOWN_CMD
+
+PC_END,
+    JMP     I PARSE_COMMAND / Return
+
+UNKNOWN_CMD,0
+    / Print "ERR"
+    JMP I UNKNOWN_CMD
+
+DO_RUN_COMMAND, 0
+    / Set specified PID's state to READY
+    / and jump to scheduler.
+    / This is a simplified "start"; assumes process is already "loaded".
+    TAD     PID_TO_RUN
+    STA     TEMP_PID
+    / Convert PID to PCB offset (PID * PCB_SIZE)
+    ASL
+    ASL                     / Assuming PCB_SIZE = 4 or 5
+    ADD     (PCBS)
+    STA     PTR             / PTR to PCB of process to run
+
+    TAD     (STATE_READY_VAL)
+    DCA     I (PTR+P_STATE) / Set state to READY
+
+    / Set CURRENT_PROCESS_INDEX to this PID before calling scheduler
+    TAD     TEMP_PID
+    DCA     CURRENT_PROCESS_INDEX
+
+    JMP     SCHEDULER       / Scheduler will find it and run it
+                            / Monitor effectively suspends here.
+TEMP_PID, 0
+PID_TO_RUN, 0
+
+    END

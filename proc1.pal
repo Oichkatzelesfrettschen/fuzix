@@ -1,0 +1,29 @@
+/ proc1.pal - Example Process A
+
+    FIELD   FIELD0      / This process runs in Field 0
+    *0200               / Code for this process starts at 200 in its field
+
+    EXTERN TTY_OUT      / External routine in kernel for TTY output
+    EXTERN YIELD        / External routine in kernel to yield CPU
+
+MSG_A,  "A"
+        0
+
+LOOP_A,
+    TAD (MSG_A)
+    JMS TTY_OUT     / Call kernel TTY_OUT (needs field switching wrapper or direct JMS to kernel)
+
+    / Delay loop (very basic)
+    TAD (DELAY_COUNT)
+    STA CTR
+DELAY_INNER_A,
+    ISZ CTR
+    JMP DELAY_INNER_A
+
+    JMS YIELD       / Yield to scheduler
+    JMP LOOP_A
+
+DELAY_COUNT, -1000  / Adjust for desired delay
+CTR,    0
+
+    END

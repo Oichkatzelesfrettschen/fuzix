@@ -1,0 +1,70 @@
+/ pdp8_kernel_data.pal
+/ Kernel Data Definitions for Minimal PDP-8 Kernel
+
+    FIELD   FIELD7      / Kernel's field for these definitions
+    *200                / Example: Kernel data starts at address 200 in Field 7 (adjust as needed)
+
+/ Temporary Save locations (must be accessible by ISR_ENTRY)
+TMP_AC_SAVE,    0       / Temp save for AC in ISR (e.g. in Page 0 of Field 0 or Kernel Page 0)
+TMP_L_SAVE,     0       / Temp save for L in ISR
+
+/ Location 0 of Field 0 (stores ISR return PC from HW JMS 0)
+SAVED_PC_FIELD0_PTR, FIELD0+0 / Pointer to actual hardware location in Field 0
+
+/ PCB Definitions
+P_AC,           0       / Offset for AC in PCB (word 0)
+P_L,            1       / Offset for Link in PCB (word 1, bit X) / Or PC LSB
+P_PC,           1       / Offset for PC in PCB (word 1) / Or PC MSB
+P_IF,           2       / Offset for IF in PCB (word 2, bits Y-Z)
+P_DF,           2       / Offset for DF in PCB (word 2, bits A-B)
+P_SSP,          3       / Offset for SSP in PCB (word 3)
+P_STATE,        4       / Offset for State in PCB (word 4)
+PCB_SIZE,       5       / Size of one PCB in words
+
+N_PROCESSES,    2       / Number of processes
+N_PROCESSES_VAL, N_PROCESSES / Value for use in code
+
+/ Process States
+STATE_FREE,     0
+STATE_READY,    1
+STATE_RUNNING,  2
+STATE_WAITING,  3       / Optional (e.g. STATE_WAITING_KBD, STATE_WAITING_TP)
+STATE_READY_VAL, STATE_READY
+STATE_RUNNING_VAL, STATE_RUNNING
+
+/ PCB Array
+PCBS,   BLOCK   N_PROCESSES * PCB_SIZE
+PCBS_BASE_ADDR, PCBS   / Alias for use in calculations
+
+/ Scheduler Variables
+CURRENT_PROCESS_INDEX, 0
+CURRENT_PROCESS_INDEX_MEM, -1 / Initial value for scheduler
+
+/ Initial Stack Pointers & Code Starts for Processes
+PROC_A_STACK_TOP,   FIELD0+07777
+PROC_A_CODE_START,  FIELD0+00200
+PROC_B_STACK_TOP,   FIELD1+07777
+PROC_B_CODE_START,  FIELD1+00200
+
+/ TTY Keyboard Input Buffer (Circular Queue)
+KB_BUF_SIZE,    32                  / Size in characters (words, as 1 char/word for now)
+KB_BUFFER,      BLOCK KB_BUF_SIZE   / The buffer itself
+KB_HEAD,        0                   / Index where TTY_KB_ISR writes next char
+KB_TAIL,        0                   / Index where TTY_GETCHAR_PROCESS reads
+KB_COUNT,       0                   / Number of chars in buffer
+
+/ TTY Teleprinter Output Buffer (Circular Queue)
+TP_BUF_SIZE,    64                  / Size in characters (words)
+TP_BUFFER,      BLOCK TP_BUF_SIZE   / The buffer itself
+TP_HEAD,        0                   / Index where TTY_PUTC_KERNEL writes
+TP_TAIL,        0                   / Index where TTY_TP_ISR reads
+TP_COUNT,       0                   / Number of chars in buffer
+TP_FLAG_BUSY,   0                   / 0 = TP idle, 1 = TP busy printing from buffer
+
+/ General constants
+ONE, 1
+MONE, -1
+CHAR_MASK_VAL, 0377
+
+
+    END
